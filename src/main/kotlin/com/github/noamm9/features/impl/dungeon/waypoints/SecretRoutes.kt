@@ -36,7 +36,9 @@ import kotlinx.coroutines.launch
 import net.minecraft.core.BlockPos
 import net.minecraft.core.Direction
 import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket
+import net.minecraft.world.phys.BlockHitResult
 import net.minecraft.world.phys.Vec3
+import net.minecraft.world.level.block.Blocks
 import org.lwjgl.glfw.GLFW
 import java.io.File
 import java.io.FileReader
@@ -55,8 +57,8 @@ object SecretRoutes: Feature(
     private const val BLOCK_MESSAGE_COOLDOWN_MS = 1_000L
     private const val BREAK_RECORD_COOLDOWN_MS = 300L
     private const val BREAK_STEP_DELAY_MS = 100L
+    private const val TNT_RECORD_COOLDOWN_MS = 300L
     private val startBlockColor = Color(80, 220, 255, 120)
-    private val tntItemIds = arrayOf("SUPERBOOM_TNT", "INFINITE_SUPERBOOM_TNT")
     private val movementKeys by lazy { listOf(mc.options.keyUp, mc.options.keyDown, mc.options.keyLeft, mc.options.keyRight, mc.options.keyJump) }
 
     private val playbackKeybind by KeybindSetting("Playback Keybind").section("keybinds")
@@ -104,6 +106,7 @@ object SecretRoutes: Feature(
     private var playbackJob: Job? = null
     private var lastBlockedMessageAt = 0L
     private var lastBreakRecord: Pair<BlockPos, Long>? = null
+    private var lastTntRecord: Triple<BlockPos, Direction, Long>? = null
 
     override fun init() {
         loadConfig()
@@ -135,6 +138,9 @@ object SecretRoutes: Feature(
 
         register<PlayerInteractEvent.RIGHT_CLICK.AIR>(EventPriority.HIGHEST) {
             if (! isRecordingCurrentRoom()) return@register
+            if (isTntItemId(event.item?.skyblockId)) {
+                if (recordTntStepFromHitResult()) return@register
+            }
             if (recordEtherwarpStep()) return@register
 
             event.isCanceled = true
@@ -146,8 +152,11 @@ object SecretRoutes: Feature(
             val itemId = event.item?.skyblockId
 
             when {
-                DungeonUtils.isSecret(event.pos) -> return@register
-                itemId != null && itemId.equalsOneOf(*tntItemIds) -> return@register
+                isRouteRightClickTarget(event.pos) -> return@register
+                isTntItemId(itemId) -> {
+                    recordTntStepFromHitResult()
+                    return@register
+                }
                 itemId == "HYPERION" -> {
                     appendStep(RouteStep(RouteStepType.USE_HYPERION, currentRelativePos(event.pos)))
                     return@register
@@ -199,18 +208,11 @@ object SecretRoutes: Feature(
             val direction = packet.hitResult.direction
 
             when {
-                held.skyblockId.equalsOneOf(*tntItemIds) -> {
-                    appendStep(
-                        RouteStep(
-                            type = RouteStepType.PLACE_TNT,
-                            pos = currentRelativePos(clicked),
-                            direction = direction,
-                            secondaryPos = currentRelativePos(clicked.relative(direction))
-                        )
-                    )
+                isTntItemId(held.skyblockId) -> {
+                    recordTntStep(clicked, direction)
                 }
 
-                DungeonUtils.isSecret(clicked) -> {
+                isRouteRightClickTarget(clicked) -> {
                     appendStep(
                         RouteStep(
                             type = RouteStepType.RIGHT_CLICK_SECRET,
@@ -231,6 +233,7 @@ object SecretRoutes: Feature(
         register<WorldChangeEvent> {
             recording = null
             lastBreakRecord = null
+            lastTntRecord = null
             releaseMovement()
             stopPlayback()
         }
@@ -246,6 +249,7 @@ object SecretRoutes: Feature(
             startBlock = toRelative(startBlock, ctx)
         )
         lastBreakRecord = null
+        lastTntRecord = null
         ChatUtils.modMessage("&aStarted recording Secret Route for &e${ctx.room.name}&a.")
     }
 
@@ -257,6 +261,7 @@ object SecretRoutes: Feature(
         saveConfig()
         recording = null
         lastBreakRecord = null
+        lastTntRecord = null
         ChatUtils.modMessage("&aSaved Secret Route for &e${session.roomName}&a with &e${routes[session.roomName]?.steps?.size}&a steps.")
     }
 
@@ -264,12 +269,22 @@ object SecretRoutes: Feature(
         if (recording == null) return
         recording = null
         lastBreakRecord = null
+        lastTntRecord = null
         ChatUtils.modMessage("&e${message ?: "Secret Route recording canceled."}")
     }
 
     fun insertWaitStep() {
         if (! isRecordingCurrentRoom()) return ChatUtils.modMessage("&cStart /nsr first before adding a wait step.")
         appendStep(RouteStep(RouteStepType.WAIT_FOR_SECRET_PROGRESS))
+    }
+
+    fun deleteCurrentRoomRoute() {
+        val ctx = currentRoomContext() ?: return ChatUtils.modMessage("&cYou must be standing in a scanned dungeon room to delete its route.")
+        val removed = routes.remove(ctx.room.name)
+            ?: return ChatUtils.modMessage("&cNo Secret Route saved for &e${ctx.room.name}&c.")
+
+        saveConfig()
+        ChatUtils.modMessage("&aDeleted Secret Route for &e${ctx.room.name}&a with &e${removed.steps.size}&a steps.")
     }
 
     private fun loadConfig() {
@@ -324,28 +339,28 @@ object SecretRoutes: Feature(
             when (step.type) {
                 RouteStepType.ETHERWARP -> {
                     val target = step.pos?.let { toWorld(it, ctx) } ?: continue
-                    if (! etherwarpTo(target, false, step.rotation())) return
+                    if (! etherwarpTo(target, false, step.rotation(ctx))) return
                 }
 
                 RouteStepType.PLACE_TNT -> {
                     val support = step.pos?.let { toWorld(it, ctx) } ?: continue
                     val face = step.direction ?: Direction.UP
-                    if (! useTargetedStep(support, face, tntItemIds, "Superboom TNT", rotation = step.rotation())) return
+                    if (! useTntStep(support, face, step.rotation(ctx))) return
                 }
 
                 RouteStepType.BREAK_BLOCK -> {
                     val target = step.pos?.let { toWorld(it, ctx) } ?: continue
-                    if (! attackBlock(target, "DUNGEONBREAKER", "Dungeoneering Pickaxe", step.rotation())) return
+                    if (! attackBlock(target, "DUNGEONBREAKER", "Dungeoneering Pickaxe", step.rotation(ctx))) return
                 }
 
                 RouteStepType.USE_HYPERION -> {
                     val target = step.pos?.let { toWorld(it, ctx) } ?: continue
-                    if (! useTargetedStep(target, null, arrayOf("HYPERION"), "Hyperion", 0.1, step.rotation())) return
+                    if (! useTargetedStep(target, null, arrayOf("HYPERION"), "Hyperion", 0.1, step.rotation(ctx))) return
                 }
 
                 RouteStepType.RIGHT_CLICK_SECRET -> {
                     val target = step.pos?.let { toWorld(it, ctx) } ?: continue
-                    if (! useTargetedStep(target, step.direction, arrayOf("DUNGEONBREAKER"), "Dungeoneering Pickaxe", rotation = step.rotation())) return
+                    if (! useTargetedStep(target, step.direction, arrayOf("DUNGEONBREAKER"), "Dungeoneering Pickaxe", rotation = step.rotation(ctx))) return
                 }
 
                 RouteStepType.WAIT_FOR_SECRET_PROGRESS -> {
@@ -414,6 +429,13 @@ object SecretRoutes: Feature(
         PlayerUtils.rightClick()
         delay(150)
         return true
+    }
+
+    private suspend fun useTntStep(block: BlockPos, face: Direction, rotation: MathUtils.Rotation?): Boolean {
+        val slot = findTntSlot() ?: return abortPlayback("&cNo Superboom/Infinity Boom TNT is on your hotbar.")
+        PlayerUtils.swapToSlot(slot)
+        delay(INTERACT_DELAY_MS)
+        return useTargetedStep(block, face, null, "Superboom TNT", rotation = rotation)
     }
 
     private suspend fun attackBlock(block: BlockPos, itemId: String, itemName: String, rotation: MathUtils.Rotation? = null): Boolean {
@@ -488,6 +510,12 @@ object SecretRoutes: Feature(
         }
     }
 
+    private fun findTntSlot(): Int? {
+        return PlayerUtils.findHotbarSlot { stack ->
+            isTntItemId(stack.skyblockId)
+        }
+    }
+
     private fun currentRoomSecretCount(room: UniqueRoom): Int {
         return ActionBarParser.secrets ?: room.foundSecrets
     }
@@ -509,6 +537,25 @@ object SecretRoutes: Feature(
         return true
     }
 
+    private fun recordTntStepFromHitResult(): Boolean {
+        val hit = mc.hitResult as? BlockHitResult ?: return false
+        return recordTntStep(hit.blockPos, hit.direction)
+    }
+
+    private fun recordTntStep(clicked: BlockPos, direction: Direction): Boolean {
+        if (! shouldRecordTnt(clicked, direction)) return false
+
+        appendStep(
+            RouteStep(
+                type = RouteStepType.PLACE_TNT,
+                pos = currentRelativePos(clicked),
+                direction = direction,
+                secondaryPos = currentRelativePos(clicked.relative(direction))
+            )
+        )
+        return true
+    }
+
     private fun shouldRecordBreak(pos: BlockPos): Boolean {
         val now = System.currentTimeMillis()
         val last = lastBreakRecord
@@ -517,9 +564,17 @@ object SecretRoutes: Feature(
         return true
     }
 
+    private fun shouldRecordTnt(pos: BlockPos, direction: Direction): Boolean {
+        val now = System.currentTimeMillis()
+        val last = lastTntRecord
+        if (last != null && last.first == pos && last.second == direction && now - last.third < TNT_RECORD_COOLDOWN_MS) return false
+        lastTntRecord = Triple(pos, direction, now)
+        return true
+    }
+
     private fun appendStep(step: RouteStep) {
         val session = recording ?: return
-        val rotation = currentRotation()
+        val rotation = currentRelativeRotation()
         val recordedStep = when {
             step.yaw != null && step.pitch != null -> step
             step.type == RouteStepType.WAIT_FOR_SECRET_PROGRESS -> step
@@ -530,9 +585,11 @@ object SecretRoutes: Feature(
         ChatUtils.modMessage("&7Recorded &e${recordedStep.type.name.lowercase().replace('_', ' ')}&7 step (${session.steps.size}).")
     }
 
-    private fun currentRotation(): MathUtils.Rotation? {
+    private fun currentRelativeRotation(): MathUtils.Rotation? {
         val player = mc.player ?: return null
-        return MathUtils.Rotation(player.yRot, player.xRot)
+        val ctx = currentRoomContext() ?: return null
+        val relativeYaw = MathUtils.normalizeYaw(player.yRot - ctx.rotation.toFloat())
+        return MathUtils.Rotation(relativeYaw, player.xRot)
     }
 
     private fun currentRelativePos(worldPos: BlockPos): BlockPos {
@@ -572,9 +629,21 @@ object SecretRoutes: Feature(
         movementKeys.forEach { it.isDown = false }
     }
 
-    private fun RouteStep.rotation(): MathUtils.Rotation? {
+    private fun isTntItemId(itemId: String?): Boolean {
+        val id = itemId ?: return false
+        return (id.contains("SUPERBOOM") && id.contains("TNT")) || (id.contains("BOOM") && id.contains("TNT"))
+    }
+
+    private fun isRouteRightClickTarget(pos: BlockPos): Boolean {
+        if (DungeonUtils.isSecret(pos)) return true
+        val block = mc.level?.getBlockState(pos)?.block ?: return false
+        return block.equalsOneOf(Blocks.BROWN_MUSHROOM, Blocks.RED_MUSHROOM)
+    }
+
+    private fun RouteStep.rotation(ctx: RoomContext): MathUtils.Rotation? {
         val yaw = yaw ?: return null
         val pitch = pitch ?: return null
-        return MathUtils.Rotation(yaw, pitch)
+        val worldYaw = MathUtils.normalizeYaw(yaw + ctx.rotation.toFloat())
+        return MathUtils.Rotation(worldYaw, pitch)
     }
 }

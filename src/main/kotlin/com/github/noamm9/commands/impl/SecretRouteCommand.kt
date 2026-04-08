@@ -24,6 +24,12 @@ object SecretRouteCommand: BaseCommand("nsr") {
             }
         }
 
+        literal("delete") {
+            runs {
+                SecretRoutes.deleteCurrentRoomRoute()
+            }
+        }
+
         runs {
             SecretRoutes.startRecording()
         }
