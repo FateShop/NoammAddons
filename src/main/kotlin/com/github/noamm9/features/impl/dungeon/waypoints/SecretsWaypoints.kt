@@ -2,16 +2,15 @@ package com.github.noamm9.features.impl.dungeon.waypoints
 
 import com.github.noamm9.NoammAddons
 import com.github.noamm9.event.impl.DungeonEvent
-import com.github.noamm9.utils.WorldUtils
 import com.github.noamm9.utils.Utils.equalsOneOf
 import com.github.noamm9.utils.dungeons.enums.SecretType
+import com.github.noamm9.utils.dungeons.map.core.RoomState
 import com.github.noamm9.utils.dungeons.map.core.UniqueRoom
 import com.github.noamm9.utils.dungeons.map.utils.ScanUtils
 import com.github.noamm9.utils.location.LocationUtils
 import com.github.noamm9.utils.render.Render3D
 import com.github.noamm9.utils.render.RenderContext
 import net.minecraft.core.BlockPos
-import net.minecraft.world.level.block.Blocks
 import java.awt.Color
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -25,6 +24,7 @@ object SecretsWaypoints {
     }
 
     private val secretDefinitions by lazy { ScanUtils.roomList.associate { it.name to it.secretCoords } }
+    private val persistentHeadTypes = setOf(SecretType.REDSTONE_KEY, SecretType.WITHER_ESSANCE)
 
     private val currentSecrets = CopyOnWriteArrayList<SecretWaypoint>()
     private var currentRoom: UniqueRoom? = null
@@ -51,6 +51,11 @@ object SecretsWaypoints {
             addSecrets(coords.chest, SecretType.CHEST)
         }
 
+        if (room.mainRoom.state == RoomState.GREEN) {
+            currentSecrets.addAll(activeSecrets.filter { it.type in persistentHeadTypes })
+            return
+        }
+
         currentSecrets.addAll(activeSecrets)
     }
 
@@ -62,7 +67,6 @@ object SecretsWaypoints {
         if (DungeonWaypoints.hideWhenCompleted.value && room != null && room.data.secrets > 0 && room.foundSecrets >= room.data.secrets) return
 
         for (wp in currentSecrets) {
-            if (wp.type == SecretType.REDSTONE_KEY && WorldUtils.getBlockAt(wp.pos) != Blocks.PLAYER_HEAD) continue
             Render3D.renderBlock(
                 ctx, wp.pos,
                 DungeonWaypoints.outlineColor.value,
@@ -86,6 +90,7 @@ object SecretsWaypoints {
         val target = if (event.type !in distinctTypes) currentSecrets.find { it.pos == event.pos }
         else currentSecrets.filter { it.type in distinctTypes }.minByOrNull { it.pos.distSqr(event.pos) }
 
+        if (target?.type in persistentHeadTypes) return
         target?.let(currentSecrets::remove)
     }
 
