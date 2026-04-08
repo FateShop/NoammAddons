@@ -25,13 +25,13 @@ object SecretsWaypoints {
     }
 
     private val secretDefinitions by lazy { ScanUtils.roomList.associate { it.name to it.secretCoords } }
+    private val persistentHeadTypes = setOf(SecretType.REDSTONE_KEY, SecretType.WITHER_ESSANCE)
 
     private val currentSecrets = CopyOnWriteArrayList<SecretWaypoint>()
 
     fun onRoomEnter(room: UniqueRoom) {
         if (! DungeonWaypoints.secretWaypoints.value) return
         currentSecrets.clear()
-        if (room.mainRoom.state == RoomState.GREEN) return
 
         val rotation = room.rotation?.let { 360 - it } ?: return
         val corner = room.corner ?: return
@@ -50,6 +50,11 @@ object SecretsWaypoints {
             addSecrets(coords.chest, SecretType.CHEST)
         }
 
+        if (room.mainRoom.state == RoomState.GREEN) {
+            currentSecrets.addAll(activeSecrets.filter { it.type in persistentHeadTypes })
+            return
+        }
+
         currentSecrets.addAll(activeSecrets)
     }
 
@@ -57,10 +62,8 @@ object SecretsWaypoints {
         if (! DungeonWaypoints.secretWaypoints.value) return
         if (LocationUtils.inBoss) return
         if (currentSecrets.isEmpty()) return
-        if (ScanUtils.currentRoom?.mainRoom?.state == RoomState.GREEN) return
 
         for (wp in currentSecrets) {
-            if (wp.type == SecretType.REDSTONE_KEY && WorldUtils.getBlockAt(wp.pos) != Blocks.PLAYER_HEAD) continue
             Render3D.renderBlock(ctx, wp.pos, wp.color, fill = false, outline = true, phase = true)
         }
     }
@@ -76,6 +79,7 @@ object SecretsWaypoints {
         val target = if (event.type !in distinctTypes) currentSecrets.find { it.pos == event.pos }
         else currentSecrets.filter { it.type in distinctTypes }.minByOrNull { it.pos.distSqr(event.pos) }
 
+        if (target?.type in persistentHeadTypes) return
         target?.let(currentSecrets::remove)
     }
 
