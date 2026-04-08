@@ -588,7 +588,7 @@ object SecretRoutes: Feature(
     private fun currentRelativeRotation(): MathUtils.Rotation? {
         val player = mc.player ?: return null
         val ctx = currentRoomContext() ?: return null
-        val relativeYaw = MathUtils.normalizeYaw(player.yRot - ctx.rotation.toFloat())
+        val relativeYaw = MathUtils.normalizeYaw(player.yRot + ctx.rotation.toFloat())
         return MathUtils.Rotation(relativeYaw, player.xRot)
     }
 
@@ -643,7 +643,7 @@ object SecretRoutes: Feature(
     private fun RouteStep.rotation(ctx: RoomContext): MathUtils.Rotation? {
         val yaw = yaw ?: return null
         val pitch = pitch ?: return null
-        val worldYaw = MathUtils.normalizeYaw(yaw + ctx.rotation.toFloat())
+        val worldYaw = MathUtils.normalizeYaw(yaw - ctx.rotation.toFloat())
         return MathUtils.Rotation(worldYaw, pitch)
     }
 }
