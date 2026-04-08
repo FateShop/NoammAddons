@@ -2,6 +2,7 @@ package com.github.noamm9.features.impl.dungeon.waypoints
 
 import com.github.noamm9.NoammAddons
 import com.github.noamm9.event.impl.DungeonEvent
+import com.github.noamm9.utils.WorldUtils
 import com.github.noamm9.utils.Utils.equalsOneOf
 import com.github.noamm9.utils.dungeons.enums.SecretType
 import com.github.noamm9.utils.dungeons.map.core.RoomState
@@ -11,6 +12,9 @@ import com.github.noamm9.utils.location.LocationUtils
 import com.github.noamm9.utils.render.Render3D
 import com.github.noamm9.utils.render.RenderContext
 import net.minecraft.core.BlockPos
+import net.minecraft.world.entity.ambient.Bat
+import net.minecraft.world.level.block.Blocks
+import net.minecraft.world.phys.Vec3
 import java.awt.Color
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -64,9 +68,15 @@ object SecretsWaypoints {
         if (LocationUtils.inBoss) return
         if (currentSecrets.isEmpty()) return
         val room = currentRoom
-        if (DungeonWaypoints.hideWhenCompleted.value && room != null && room.data.secrets > 0 && room.foundSecrets >= room.data.secrets) return
+        val completed = DungeonWaypoints.hideWhenCompleted.value && room != null && room.data.secrets > 0 && room.foundSecrets >= room.data.secrets
+        val secretsToRender = if (completed) currentSecrets.filter { it.type in persistentHeadTypes } else currentSecrets
 
-        for (wp in currentSecrets) {
+        for (wp in secretsToRender) {
+            if (wp.type in persistentHeadTypes && WorldUtils.getBlockAt(wp.pos) != Blocks.PLAYER_HEAD) {
+                renderGhostHead(ctx, wp)
+                continue
+            }
+
             Render3D.renderBlock(
                 ctx, wp.pos,
                 DungeonWaypoints.outlineColor.value,
@@ -92,6 +102,57 @@ object SecretsWaypoints {
 
         if (target?.type in persistentHeadTypes) return
         target?.let(currentSecrets::remove)
+    }
+
+    fun findGhostHeadTargetForRoute(maxDistance: Double = 6.0): BlockPos? {
+        val player = NoammAddons.mc.player ?: return null
+        val eye = player.eyePosition
+        val look = player.lookAngle.normalize()
+
+        return currentSecrets.asSequence()
+            .filter { it.type in persistentHeadTypes && WorldUtils.getBlockAt(it.pos) != Blocks.PLAYER_HEAD }
+            .mapNotNull { waypoint ->
+                val center = Vec3.atCenterOf(waypoint.pos)
+                val delta = center.subtract(eye)
+                val forward = delta.dot(look)
+                if (forward !in 0.0..maxDistance) return@mapNotNull null
+
+                val closestPoint = eye.add(look.scale(forward))
+                val offset = center.distanceTo(closestPoint)
+                if (offset > 0.85) return@mapNotNull null
+
+                waypoint.pos to Pair(offset, forward)
+            }
+            .minWithOrNull(compareBy<Pair<BlockPos, Pair<Double, Double>>>({ it.second.first }, { it.second.second }))
+            ?.first
+    }
+
+    fun hasSpawnedBatInCurrentRoom(): Boolean {
+        val level = NoammAddons.mc.level ?: return false
+        val batSecrets = currentSecrets.filter { it.type == SecretType.BAT }
+        if (batSecrets.isEmpty()) return false
+
+        return level.entitiesForRendering()
+            .filterIsInstance<Bat>()
+            .any { bat ->
+                ! bat.isRemoved && ! bat.isInvisible && batSecrets.any { it.pos.distSqr(bat.blockPosition()) <= 9.0 }
+            }
+    }
+
+    private fun renderGhostHead(ctx: RenderContext, waypoint: SecretWaypoint) {
+        Render3D.renderBox(
+            ctx,
+            waypoint.pos.x + 0.5,
+            waypoint.pos.y,
+            waypoint.pos.z + 0.5,
+            0.5,
+            0.5,
+            waypoint.color,
+            outline = true,
+            fill = true,
+            phase = DungeonWaypoints.phase.value,
+            lineWidth = DungeonWaypoints.lineWidth.value.toFloat()
+        )
     }
 
     fun clear() {

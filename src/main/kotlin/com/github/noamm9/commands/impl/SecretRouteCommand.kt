@@ -24,6 +24,12 @@ object SecretRouteCommand: BaseCommand("nsr") {
             }
         }
 
+        literal("bat") {
+            runs {
+                SecretRoutes.insertBatWaitStep()
+            }
+        }
+
         literal("delete") {
             runs {
                 SecretRoutes.deleteCurrentRoomRoute()

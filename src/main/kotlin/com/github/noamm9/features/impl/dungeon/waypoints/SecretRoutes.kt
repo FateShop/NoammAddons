@@ -71,7 +71,8 @@ object SecretRoutes: Feature(
         BREAK_BLOCK,
         USE_HYPERION,
         RIGHT_CLICK_SECRET,
-        WAIT_FOR_SECRET_PROGRESS
+        WAIT_FOR_SECRET_PROGRESS,
+        WAIT_FOR_BAT_SPAWN
     }
 
     private data class RouteStep(
@@ -138,6 +139,7 @@ object SecretRoutes: Feature(
 
         register<PlayerInteractEvent.RIGHT_CLICK.AIR>(EventPriority.HIGHEST) {
             if (! isRecordingCurrentRoom()) return@register
+            if (recordGhostHeadClick()) return@register
             if (isTntItemId(event.item?.skyblockId)) {
                 if (recordTntStepFromHitResult()) return@register
             }
@@ -152,6 +154,7 @@ object SecretRoutes: Feature(
             val itemId = event.item?.skyblockId
 
             when {
+                recordGhostHeadClick() -> return@register
                 isRouteRightClickTarget(event.pos) -> return@register
                 isTntItemId(itemId) -> {
                     recordTntStepFromHitResult()
@@ -278,6 +281,11 @@ object SecretRoutes: Feature(
         appendStep(RouteStep(RouteStepType.WAIT_FOR_SECRET_PROGRESS))
     }
 
+    fun insertBatWaitStep() {
+        if (! isRecordingCurrentRoom()) return ChatUtils.modMessage("&cStart /nsr first before adding a bat wait step.")
+        appendStep(RouteStep(RouteStepType.WAIT_FOR_BAT_SPAWN))
+    }
+
     fun deleteCurrentRoomRoute() {
         val ctx = currentRoomContext() ?: return ChatUtils.modMessage("&cYou must be standing in a scanned dungeon room to delete its route.")
         val removed = routes.remove(ctx.room.name)
@@ -365,6 +373,10 @@ object SecretRoutes: Feature(
 
                 RouteStepType.WAIT_FOR_SECRET_PROGRESS -> {
                     waitForSecretProgress(ctx.room)
+                }
+
+                RouteStepType.WAIT_FOR_BAT_SPAWN -> {
+                    waitForBatSpawn()
                 }
             }
         }
@@ -467,6 +479,17 @@ object SecretRoutes: Feature(
         ChatUtils.modMessage("&eSkipped wait step after ${WAIT_TIMEOUT_MS / 1000}s without secret progress.")
     }
 
+    private suspend fun waitForBatSpawn() {
+        val start = System.currentTimeMillis()
+
+        while (System.currentTimeMillis() - start < WAIT_TIMEOUT_MS) {
+            if (SecretsWaypoints.hasSpawnedBatInCurrentRoom()) return
+            delay(50)
+        }
+
+        ChatUtils.modMessage("&eSkipped bat wait step after ${WAIT_TIMEOUT_MS / 1000}s without a bat spawning.")
+    }
+
     private suspend fun aimAtTarget(block: BlockPos, vec: Vec3 = BlockAimUtils.blockCenter(block)): Boolean {
         BlockAimUtils.aimAt(vec, ROTATION_TIME_MS)
         delay(INTERACT_DELAY_MS)
@@ -537,6 +560,12 @@ object SecretRoutes: Feature(
         return true
     }
 
+    private fun recordGhostHeadClick(): Boolean {
+        val target = SecretsWaypoints.findGhostHeadTargetForRoute() ?: return false
+        appendStep(RouteStep(RouteStepType.RIGHT_CLICK_SECRET, currentRelativePos(target)))
+        return true
+    }
+
     private fun recordTntStepFromHitResult(): Boolean {
         val hit = mc.hitResult as? BlockHitResult ?: return false
         return recordTntStep(hit.blockPos, hit.direction)
@@ -577,7 +606,7 @@ object SecretRoutes: Feature(
         val rotation = currentRelativeRotation()
         val recordedStep = when {
             step.yaw != null && step.pitch != null -> step
-            step.type == RouteStepType.WAIT_FOR_SECRET_PROGRESS -> step
+            step.type == RouteStepType.WAIT_FOR_SECRET_PROGRESS || step.type == RouteStepType.WAIT_FOR_BAT_SPAWN -> step
             else -> step.copy(yaw = rotation?.yaw, pitch = rotation?.pitch)
         }
 
@@ -637,7 +666,7 @@ object SecretRoutes: Feature(
     private fun isRouteRightClickTarget(pos: BlockPos): Boolean {
         if (DungeonUtils.isSecret(pos)) return true
         val block = mc.level?.getBlockState(pos)?.block ?: return false
-        return block.equalsOneOf(Blocks.BROWN_MUSHROOM, Blocks.RED_MUSHROOM)
+        return block.equalsOneOf(Blocks.BROWN_MUSHROOM, Blocks.RED_MUSHROOM, Blocks.REDSTONE_BLOCK)
     }
 
     private fun RouteStep.rotation(ctx: RoomContext): MathUtils.Rotation? {
